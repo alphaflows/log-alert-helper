@@ -9,10 +9,13 @@ All knobs are exposed as environment variables so the same config can run on you
 ```bash
 cd mega-test/log-tell
 cp .env.example .env   # edit if you want different creds/endpoints
+# Log offsets persist under fluentbit/state (mounted automatically)
 ```
 
 Key variables (see `.env.example` for defaults):
 
+- `FLB_IMAGE_TAG`, `OO_IMAGE_TAG` – pin exact container versions so every server runs the same build.
+- `FLB_STORAGE_TOTAL_LIMIT` / `FLB_TAIL_MEM_BUF_LIMIT` – how much disk/memory each edge collector can spend buffering when OpenObserve is slow.
 - `OO_HTTP_HOST` – hostname Fluent Bit hits (use `openobserve` when running the local stack, or your production load balancer).
 - `OO_AUTH_HEADER` – `Basic <base64(email:password)>` that matches the OpenObserve user/tenant.
 - `LOG_INCLUDE_REGEX` – which lines you want to ingest at all. Keep it broad (e.g. `(?i)(info|error|exception)`) during testing, switch to `(?i)(error|exception)` for production.
@@ -27,7 +30,8 @@ docker network create log-tell 2>/dev/null || true
 # OpenObserve (stores + alerts)
 docker compose --env-file .env -f openobserve/docker-compose.yml up -d
 
-# Fluent Bit (collector + router)
+# Fluent Bit (collector + router). On Linux hosts this container needs
+# access to /var/lib/docker/containers and /var/run/docker.sock.
 docker compose --env-file .env -f fluentbit/docker-compose.yml up -d
 ```
 
@@ -37,7 +41,12 @@ Because the Fluent Bit compose file uses the `fluent/fluent-bit:3.0.4-debug` ima
 docker exec -it fluentbit /bin/bash -lc 'wc -l /var/lib/docker/containers/*/*-json.log'
 ```
 
-If you already run OpenObserve elsewhere, skip the first compose command, set `OO_HTTP_HOST=host.docker.internal` (or your load balancer DNS), and launch Fluent Bit on every server that hosts containers.
+If you already run OpenObserve elsewhere, skip the first compose command, set `OO_HTTP_HOST=host.docker.internal` (or your load balancer DNS), and launch Fluent Bit on every server that hosts containers. Each Fluent Bit instance now:
+
+- Persists tail offsets under `fluentbit/state` so restarts never replay old logs.
+- Reads Docker metadata through `/var/run/docker.sock`, adding `container_name`, `image`, and label fields to every event so you can slice dashboards per workload.
+- Buffers both inputs and outputs onto disk before retrying, which prevents data loss when the central OpenObserve endpoint is busy.
+
 On Linux hosts the `/var/lib/docker/containers` bind immediately exposes every container log file; on macOS/Windows that path is empty because Docker Desktop runs inside a VM, so rely on the Fluentd/Forward input described below to stream logs instead of tailing files.
 
 ### 3. Verify ingestion quickly
@@ -92,7 +101,7 @@ services:
         tag: manta-api
 ```
 
-Every log line emitted by `manta-api` now flows through the same Fluent Bit filters, is indexed into the `logs` stream, and—if it matches `LOG_ALERT_REGEX`—is duplicated into `logs_alerts` for alert rules. Repeat the logging block for any other service you need.
+Every log line emitted by `manta-api` now flows through the same Fluent Bit filters, is indexed into the `logs` stream, and—if it matches `LOG_ALERT_REGEX`—is duplicated into `logs_alerts` for alert rules. Repeat the logging block for any other service you need. Because the Docker metadata filter attaches `container_name`, `image`, and label fields, you can distinguish each backend either through OpenObserve filters or by switching `OO_STREAM_LOGS` per stack/environment.
 
 ### 5. Alerting flow
 
@@ -110,9 +119,10 @@ Every log line emitted by `manta-api` now flows through the same Fluent Bit filt
 
 ### 6. Adapting for production
 
-- **Collector footprint**: Deploy the Fluent Bit container (or the same config file) on every backend host/VM, mounting `/var/lib/docker/containers` read-only. Point `OO_HTTP_HOST` at the central OpenObserve URL over TLS.
+- **Collector footprint**: Deploy the Fluent Bit container (or the same config file) on every backend host/VM, mounting `/var/lib/docker/containers` read-only plus `/var/run/docker.sock` for metadata. Point `OO_HTTP_HOST` at the central OpenObserve URL; by default this stack just uses the simple Basic auth header so you can get alerts running quickly.
+- **Stateful offsets**: Make sure `fluentbit/state` is on fast local storage (or map it to a host path) so log positions survive container restarts.
 - **Multi-tenant streams**: Use a different `OO_STREAM_LOGS` per environment/app (e.g., `logs_prod`, `logs_stage`). OpenObserve keeps them separated while sharing storage.
-- **Noise control**: tighten `LOG_INCLUDE_REGEX`, add additional `grep` filters, or use Fluent Bit’s `lua`/`modify` filters to parse structured JSON payloads before they hit OpenObserve.
+- **Noise control**: tighten `LOG_INCLUDE_REGEX`, add additional `grep` filters, or use Fluent Bit’s `lua`/`modify` filters to parse structured JSON payloads before they hit OpenObserve. The bundled multiline parser already keeps stack traces intact for alerting.
 - **Alternate backends**: If you prefer Loki, Elasticsearch, or any SIEM, swap the Fluent Bit output plugin while keeping the same filters. OpenObserve was chosen here because it bundles alerting and dashboards in one binary.
 
 ### 7. Troubleshooting checklist
