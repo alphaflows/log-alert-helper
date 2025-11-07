@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  # -------------------------------
+  # OpenObserve
+  # -------------------------------
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    container_name: openobserve
+    environment:
+      - ZO_ROOT_USER_EMAIL=admin@example.com
+      - ZO_ROOT_USER_PASSWORD=Admin123!
+    ports:
+      - "5080:5080"
+      - "5081:5081"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  # -------------------------------
+  # Python Monitoring Agent
+  # -------------------------------
+  logagent:
+    build:
+      context: ./monitor
+      dockerfile: Dockerfile
+    container_name: logagent
+    depends_on:
+      - openobserve
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # ✅ allow reading docker logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
