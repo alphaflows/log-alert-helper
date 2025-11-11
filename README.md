@@ -17,6 +17,7 @@ docker compose --env-file .env up -d
 ```
 
 By default the UI/API live at `http://192.168.61.50:5080`. Record the username/password because the collectors authenticate with those values.
+Set `OO_BASE_URL` to `http://<server-ip>:5080` (or `https://<server-name>` if fronted by TLS) so that alert emails/webhooks link back to the real host instead of `localhost`.
 If you need OpenObserve to send email alerts, fill in the SMTP variables near the bottom of `openobserve/.env`—the example file shows a working Gmail/StartTLS configuration.
 
 ## 2. Fluent Bit option (Linux hosts)
@@ -66,6 +67,7 @@ docker compose up -d
 ```
 
 - `OPENOBSERVE_URL` should point at the same ingestion endpoint as Fluent Bit (example: `http://192.168.61.50:5080/api/default/default/_json`).
+- `MONITOR_HOST` (optional) overrides the `host` field sent to OpenObserve if you want the logs labeled with the physical machine instead of the container hostname.
 - `OPENOBSERVE_USER` / `OPENOBSERVE_PASSWORD` reuse your OpenObserve credentials.
 - `ERROR_PATTERN` defaults to `(error|exception|traceback)` (compiled with `re.IGNORECASE`) and matches each `docker logs` line before enqueueing it for delivery.
 

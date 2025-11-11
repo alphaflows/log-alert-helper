@@ -21,6 +21,9 @@ DEFAULT_CONTAINERS = [
     "manta-vllm-server-2",
 ]
 
+DEFAULT_HOSTNAME = socket.gethostname()
+MONITOR_HOST = os.getenv("MONITOR_HOST", DEFAULT_HOSTNAME)
+
 
 def _env_list(key: str, fallback: List[str]) -> List[str]:
     raw = os.getenv(key)
@@ -99,7 +102,7 @@ def enqueue_log(container: str, line: str) -> None:
         "container": container,
         "log": line,
         "severity": "error",
-        "host": socket.gethostname(),
+        "host": MONITOR_HOST,
     }
 
     try:
