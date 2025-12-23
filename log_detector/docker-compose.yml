@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: log_detector
+      POSTGRES_PASSWORD: log_detector
+      POSTGRES_DB: log_detector
+    volumes:
+      - log_detector_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U log_detector"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    env_file:
+      - ./.env
+    ports:
+      - "8007:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  log_detector_db:
