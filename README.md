@@ -44,12 +44,13 @@ The agent can run on any host with Docker access.
 ### Local run
 
 ```bash
+cd agent
 python -m venv .venv
 source .venv/bin/activate
-pip install -r agent/requirements.txt
-cp agent/.env.example agent/.env
-export $(cat agent/.env | xargs)
-python agent/monitor.py
+pip install -r requirements.txt
+cp .env.example .env
+export $(cat .env | xargs)
+nohup python monitor.py > monitor.log 2>&1 &
 ```
 
 ### Docker run
