@@ -3,6 +3,7 @@ import logging
 import os
 import queue
 import re
+import shlex
 import socket
 import subprocess
 import threading
@@ -35,6 +36,7 @@ ALERT_COALESCE_SECONDS = float(os.getenv("ALERT_COALESCE_SECONDS", "0"))
 ALERT_COALESCE_MAX_SECONDS = float(os.getenv("ALERT_COALESCE_MAX_SECONDS", "30"))
 ALERT_COALESCE_MAX_ENTRIES = int(os.getenv("ALERT_COALESCE_MAX_ENTRIES", "50"))
 ALERT_COALESCE_POLL_SECONDS = 0.5
+DOCKER_CMD = os.getenv("DOCKER_CMD", "docker")
 
 TRACEBACK_BRIDGE_PREFIXES = (
     "During handling of the above exception",
@@ -265,7 +267,7 @@ def _coalesce_worker() -> None:
 def follow_container(container: str) -> None:
     logging.info("Monitoring container %s", container)
     while not STOP_EVENT.is_set():
-        cmd = ["docker", "logs", "-f", "--tail", "0", container]
+        cmd = shlex.split(DOCKER_CMD) + ["logs", "-f", "--tail", "0", container]
         try:
             process = subprocess.Popen(
                 cmd,
@@ -275,7 +277,7 @@ def follow_container(container: str) -> None:
                 bufsize=1,
             )
         except FileNotFoundError:
-            logging.error("docker CLI not found inside container.")
+            logging.error("Docker CLI not found. DOCKER_CMD=%s", DOCKER_CMD)
             return
         except Exception as exc:  # noqa: BLE001
             logging.error("Unable to start docker logs for %s: %s", container, exc)

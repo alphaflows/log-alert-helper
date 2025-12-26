@@ -72,6 +72,7 @@ docker run --rm \
 - `ALERT_COALESCE_SECONDS`: Window to combine consecutive error logs into one alert (set `0` to disable).
 - `ALERT_COALESCE_MAX_SECONDS`: Max time to hold a coalesced batch before flushing.
 - `ALERT_COALESCE_MAX_ENTRIES`: Max entries per coalesced batch before flushing.
+- `DOCKER_CMD`: Docker command to run (e.g. `sudo docker` when the host requires sudo).
 
 ## Notes
 
