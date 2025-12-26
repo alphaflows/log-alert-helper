@@ -69,6 +69,9 @@ docker run --rm \
 - `MONITOR_CONTAINERS`: Comma-separated list of containers to follow.
 - `LOG_MATCH_PATTERNS`: Comma-separated regex patterns; defaults to `ERROR_PATTERN` if empty.
 - `TRACEBACK_PATTERN`: Regex to detect traceback blocks.
+- `ALERT_COALESCE_SECONDS`: Window to combine consecutive error logs into one alert (set `0` to disable).
+- `ALERT_COALESCE_MAX_SECONDS`: Max time to hold a coalesced batch before flushing.
+- `ALERT_COALESCE_MAX_ENTRIES`: Max entries per coalesced batch before flushing.
 
 ## Notes
 

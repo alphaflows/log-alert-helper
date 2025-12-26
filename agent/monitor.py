@@ -8,8 +8,10 @@ import subprocess
 import threading
 import time
 from typing import List, Optional
-
+from dotenv import load_dotenv
 import requests
+
+load_dotenv()
 
 DEFAULT_CONTAINERS: List[str] = []
 DEFAULT_HOSTNAME = socket.gethostname()
@@ -29,6 +31,10 @@ SEND_BASE_BACKOFF = float(os.getenv("SEND_BASE_BACKOFF", "1.5"))
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "2"))
 READ_TIMEOUT = float(os.getenv("READ_TIMEOUT", "5"))
 CONTAINER_RESTART_DELAY = float(os.getenv("CONTAINER_RESTART_DELAY", "3"))
+ALERT_COALESCE_SECONDS = float(os.getenv("ALERT_COALESCE_SECONDS", "0"))
+ALERT_COALESCE_MAX_SECONDS = float(os.getenv("ALERT_COALESCE_MAX_SECONDS", "30"))
+ALERT_COALESCE_MAX_ENTRIES = int(os.getenv("ALERT_COALESCE_MAX_ENTRIES", "50"))
+ALERT_COALESCE_POLL_SECONDS = 0.5
 
 TRACEBACK_BRIDGE_PREFIXES = (
     "During handling of the above exception",
@@ -42,6 +48,8 @@ NEW_LOG_LINE_PATTERN = re.compile(
 
 LOG_QUEUE: "queue.Queue[dict]" = queue.Queue(maxsize=QUEUE_MAX_SIZE)
 STOP_EVENT = threading.Event()
+ALERT_BATCHES: dict[str, dict] = {}
+ALERT_BATCH_LOCK = threading.Lock()
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -115,6 +123,68 @@ def _enqueue_log(container: str, line: str, severity: str) -> None:
         logging.warning("Dropping log; queue full (size=%s)", LOG_QUEUE.qsize())
 
 
+def _batch_exceeded_limits(batch: dict, now: float) -> bool:
+    if ALERT_COALESCE_MAX_ENTRIES > 0 and len(batch["messages"]) >= ALERT_COALESCE_MAX_ENTRIES:
+        return True
+    if ALERT_COALESCE_MAX_SECONDS > 0 and now - batch["first_seen"] >= ALERT_COALESCE_MAX_SECONDS:
+        return True
+    return False
+
+
+def _format_batch_message(batch: dict) -> str:
+    messages = batch["messages"]
+    if len(messages) == 1:
+        return messages[0]
+    span = max(0.0, batch["last_seen"] - batch["first_seen"])
+    divider = "\n\n" + ("-" * 72) + "\n\n"
+    header = f"Aggregated {len(messages)} log entries over {span:.1f}s."
+    return f"{header}\n\n{divider.join(messages)}"
+
+
+def _flush_batch(container: str, batch: dict) -> None:
+    message = _format_batch_message(batch)
+    _enqueue_log(container, message, batch["severity"])
+
+
+def _queue_alert(container: str, line: str, severity: str) -> None:
+    if ALERT_COALESCE_SECONDS <= 0:
+        _enqueue_log(container, line, severity)
+        return
+
+    now = time.monotonic()
+    to_flush: List[tuple[str, dict]] = []
+
+    with ALERT_BATCH_LOCK:
+        batch = ALERT_BATCHES.get(container)
+        if batch:
+            if now - batch["last_seen"] > ALERT_COALESCE_SECONDS or _batch_exceeded_limits(
+                batch, now
+            ):
+                ALERT_BATCHES.pop(container, None)
+                to_flush.append((container, batch))
+                batch = None
+
+        if batch is None:
+            ALERT_BATCHES[container] = {
+                "messages": [line],
+                "severity": severity,
+                "first_seen": now,
+                "last_seen": now,
+            }
+        else:
+            if not batch["messages"] or batch["messages"][-1] != line:
+                batch["messages"].append(line)
+            batch["last_seen"] = now
+            if severity == "fatal":
+                batch["severity"] = "fatal"
+            if _batch_exceeded_limits(batch, now):
+                ALERT_BATCHES.pop(container, None)
+                to_flush.append((container, batch))
+
+    for container_name, batch in to_flush:
+        _flush_batch(container_name, batch)
+
+
 def _send_payload(payload: dict) -> bool:
     headers = {}
     if BACKEND_API_KEY:
@@ -164,6 +234,34 @@ def _sender_worker() -> None:
     logging.info("Sender worker exiting.")
 
 
+def _coalesce_worker() -> None:
+    logging.info("Alert coalescing worker started.")
+    while not STOP_EVENT.is_set():
+        now = time.monotonic()
+        to_flush: List[tuple[str, dict]] = []
+
+        with ALERT_BATCH_LOCK:
+            for container, batch in list(ALERT_BATCHES.items()):
+                idle_time = now - batch["last_seen"]
+                if idle_time >= ALERT_COALESCE_SECONDS or _batch_exceeded_limits(batch, now):
+                    ALERT_BATCHES.pop(container, None)
+                    to_flush.append((container, batch))
+
+        for container_name, batch in to_flush:
+            _flush_batch(container_name, batch)
+
+        time.sleep(ALERT_COALESCE_POLL_SECONDS)
+
+    with ALERT_BATCH_LOCK:
+        remaining = list(ALERT_BATCHES.items())
+        ALERT_BATCHES.clear()
+
+    for container_name, batch in remaining:
+        _flush_batch(container_name, batch)
+
+    logging.info("Alert coalescing worker exiting.")
+
+
 def follow_container(container: str) -> None:
     logging.info("Monitoring container %s", container)
     while not STOP_EVENT.is_set():
@@ -192,7 +290,7 @@ def follow_container(container: str) -> None:
             if not traceback_buffer:
                 return
             message = "\n".join(traceback_buffer)
-            _enqueue_log(container, message, severity="fatal")
+            _queue_alert(container, message, severity="fatal")
             traceback_buffer = []
 
         for raw_line in process.stdout:
@@ -222,7 +320,7 @@ def follow_container(container: str) -> None:
                 continue
 
             if is_match_line(line):
-                _enqueue_log(container, line, severity="error")
+                _queue_alert(container, line, severity="error")
 
         exit_code = process.wait()
 
@@ -257,6 +355,11 @@ def main() -> None:
     sender_thread = threading.Thread(target=_sender_worker, daemon=True)
     sender_thread.start()
 
+    coalesce_thread = None
+    if ALERT_COALESCE_SECONDS > 0:
+        coalesce_thread = threading.Thread(target=_coalesce_worker, daemon=True)
+        coalesce_thread.start()
+
     threads = []
     for container in CONTAINERS:
         t = threading.Thread(target=follow_container, args=(container,), daemon=True)
@@ -274,6 +377,8 @@ def main() -> None:
         for t in threads:
             t.join(timeout=1)
         sender_thread.join(timeout=5)
+        if coalesce_thread:
+            coalesce_thread.join(timeout=5)
         logging.info("Monitor stopped.")
 
 
